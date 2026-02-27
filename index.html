@@ -1,1 +1,422 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>크아 게시판 Config.xml 생성 관리툴 (v22)</title>
+    <style>
+        /* CSS는 이전과 완전히 동일합니다. */
+        body { font-family: sans-serif; display: flex; padding: 20px; flex-wrap: wrap; }
+        #editor-container { display: flex; width: 100%; }
+        #canvas-wrapper { border: 2px solid #ccc; position: relative; background-size: cover; background-position: center; width: 360px; height: 349px; }
+        #canvas { width: 100%; height: 100%; position: relative; overflow: hidden; }
+        .draggable { position: absolute; cursor: move; border: 1px dashed #aaa; user-select: none; }
+        .draggable.selected { border: 2px solid #3498db; }
+        .draggable img { width: 100%; height: 100%; pointer-events: none; object-fit: contain; }
+        .draggable .text-content { width: 100%; height: 100%; overflow: visible; padding: 0; margin: 0; box-sizing: border-box; white-space: nowrap; font-family: 'Gulim', '굴림', sans-serif; font-size: 10pt; line-height: 1; }
+        .resizer { width: 10px; height: 10px; background: #3498db; position: absolute; right: -5px; bottom: -5px; cursor: se-resize; }
+        #toolbox { width: 200px; padding: 10px; border-right: 1px solid #ddd; }
+        #toolbox h4 { margin-top: 0; }
+        #toolbox button, #toolbox label { display: block; width: 100%; margin-bottom: 10px; padding: 8px; text-align: center; box-sizing: border-box;}
+        .file-label { background-color: #f0f0f0; cursor: pointer; }
+        .file-input { display: none; }
+        #property-panel { width: 250px; padding: 10px; border-left: 1px solid #ddd; }
+        #property-panel .prop-group { margin-bottom: 15px; }
+        #property-panel label { display: block; margin-bottom: 5px; font-weight: bold; }
+        #property-panel input, #property-panel select { width: 95%; padding: 5px; }
+        #xml-output-container { margin-top: 20px; width: 100%; }
+        #xml-output { width: 100%; height: 300px; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <!-- HTML 구조는 이전과 동일 -->
+    <div id="editor-container">
+        <div id="toolbox">
+            <h4>툴박스</h4>
+            <label for="background-upload" class="file-label">배경 이미지 선택</label>
+            <input type="file" id="background-upload" class="file-input" accept="image/*">
+            <hr>
+            <label for="item-upload" class="file-label">아이템 이미지 추가</label>
+            <input type="file" id="item-upload" class="file-input" accept="image/*">
+            <button id="add-text">텍스트 추가</button>
+            <button id="add-avatar">아바타 (예시) 추가</button>
+            <button id="add-effect">이펙트 (예시) 추가</button>
+            <hr>
+            <button id="generate-xml">XML 생성</button>
+        </div>
+        <div id="canvas-wrapper">
+            <div id="canvas"></div>
+        </div>
+        <div id="property-panel">
+            <h4>속성</h4>
+            <div id="props-content">선택된 요소 없음</div>
+        </div>
+    </div>
+    <div id="xml-output-container">
+        <h4>생성된 XML 코드</h4>
+        <textarea id="xml-output" readonly></textarea>
+    </div>
 
+    <script>
+        const canvas = document.getElementById('canvas');
+        const propsContent = document.getElementById('props-content');
+        const backgroundUpload = document.getElementById('background-upload');
+        const itemUpload = document.getElementById('item-upload');
+        let selectedElement = null;
+        let elementCounter = 0;
+        let backgroundFileName = "your_background.jpg";
+
+        // (파일 업로드, delete 키 등 이전 코드와 동일)
+        backgroundUpload.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => { canvas.style.backgroundImage = `url(${e.target.result})`; };
+                reader.readAsDataURL(file);
+                backgroundFileName = file.name;
+            }
+        });
+        
+        itemUpload.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            const itemSN = prompt("이 아이템의 ItemSN을 입력하세요:", "12345");
+            if (!itemSN || isNaN(itemSN)) {
+                alert("올바른 ItemSN(숫자)을 입력해야 합니다.");
+                itemUpload.value = '';
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    addNewElement('ItemIcon', {
+                        itemSN: itemSN, img: e.target.result, 
+                        width: img.width, height: img.height
+                    });
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+            itemUpload.value = '';
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if ((e.key === 'Delete' || e.key === 'Backspace') && selectedElement) {
+                if (document.activeElement.tagName === 'INPUT') return;
+                if (confirm(`'${selectedElement.dataset.id}' 요소를 삭제하시겠습니까?`)) {
+                    selectedElement.remove();
+                    selectElement(null);
+                }
+            }
+        });
+        
+        function makeInteractive(element) {
+            let pos3 = 0, pos4 = 0;
+            element.onmousedown = dragMouseDown;
+
+            function dragMouseDown(e) {
+                if (e.target.classList.contains('resizer')) return;
+                e.preventDefault(); e.stopPropagation();
+                selectElement(element);
+                pos3 = e.clientX; pos4 = e.clientY;
+                document.onmouseup = closeDragElement;
+                document.onmousemove = elementDrag;
+            }
+
+            function elementDrag(e) {
+                e.preventDefault();
+                const dx = e.clientX - pos3; const dy = e.clientY - pos4;
+                pos3 = e.clientX; pos4 = e.clientY;
+                const newTop = Math.max(0, Math.min(canvas.clientHeight - element.clientHeight, element.offsetTop + dy));
+                const newLeft = Math.max(0, Math.min(canvas.clientWidth - element.clientWidth, element.offsetLeft + dx));
+                element.style.top = newTop + "px";
+                element.style.left = newLeft + "px";
+                element.dataset.y = newTop;
+                element.dataset.x = newLeft;
+                updatePropInput('x', newLeft);
+                updatePropInput('y', newTop);
+            }
+
+            const resizer = element.querySelector('.resizer');
+            if (resizer) {
+                resizer.onmousedown = resizeMouseDown;
+                function resizeMouseDown(e) {
+                    e.preventDefault(); e.stopPropagation();
+                    let startX = e.clientX;
+                    let startWidth = parseInt(window.getComputedStyle(element).width, 10);
+                    const originalRatio = element.dataset.originalHeight / element.dataset.originalWidth;
+                    document.onmousemove = resizeDrag;
+                    document.onmouseup = stopResize;
+                    function resizeDrag(e) {
+                        let newWidth = startWidth + e.clientX - startX;
+                        let newHeight = newWidth * originalRatio;
+                        if(element.dataset.type === 'Text'){ newHeight = parseInt(window.getComputedStyle(element).height, 10); }
+                        element.style.width = newWidth > 10 ? newWidth + "px" : "10px";
+                        element.style.height = newHeight > 10 ? newHeight + "px" : "10px";
+                        element.dataset.width = newWidth > 10 ? newWidth : 10;
+                        element.dataset.height = newHeight > 10 ? newHeight : 10;
+                        updatePropInput('width', newWidth);
+                        updatePropInput('height', newHeight);
+                        if (element.dataset.type === 'ItemIcon') {
+                            const originalWidthForRatio = 50;
+                            const newRatio = ((newWidth > 10 ? newWidth : 10) / originalWidthForRatio) * 100;
+                            element.dataset.ratio = newRatio;
+                            updatePropInput('ratio', newRatio);
+                        }
+                    }
+                    function stopResize() {
+                        document.onmousemove = null; document.onmouseup = null;
+                    }
+                }
+            }
+            function closeDragElement() {
+                document.onmouseup = null; document.onmousemove = null;
+            }
+        }
+        
+        function selectElement(element) {
+            document.querySelectorAll('.draggable').forEach(el => el.classList.remove('selected'));
+            selectedElement = element;
+            if (selectedElement) {
+                selectedElement.classList.add('selected');
+            }
+            renderPropertiesPanel();
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.target === canvas) selectElement(null);
+        });
+        
+        propsContent.addEventListener('input', (e) => {
+            if (!selectedElement || !e.target.matches('input[data-prop]')) return;
+            handlePropertyChange(e);
+        });
+
+        function updatePropInput(prop, value) {
+            const input = propsContent.querySelector(`input[data-prop="${prop}"]`);
+            if (input) {
+                input.value = (prop === 'ratio') ? parseFloat(value).toFixed(0) : Math.round(parseFloat(value));
+            }
+        }
+        
+        function applyTextStyles(element) {
+            const textContent = element.querySelector('.text-content');
+            if (!textContent) return;
+            const props = element.dataset;
+            textContent.innerText = props.string;
+            let textAlign = 'left';
+            if (props.align == 2) textAlign = 'center';
+            if (props.align == 3) textAlign = 'right';
+            textContent.style.textAlign = textAlign;
+            
+            // 미리보기를 위해 # 형식으로 변환하여 적용
+            textContent.style.color = `#${props.colorDefault}`;
+            
+            if ([3, 4, 5, 7].includes(parseInt(props.style))) {
+                textContent.style.fontWeight = 'bold';
+            } else {
+                textContent.style.fontWeight = 'normal';
+            }
+            if ([2, 5].includes(parseInt(props.style))) {
+                const outlineColor = `#${props.colorOutline}`;
+                textContent.style.textShadow = `-1px -1px 0 ${outlineColor}, 1px -1px 0 ${outlineColor}, -1px 1px 0 ${outlineColor}, 1px 1px 0 ${outlineColor}`;
+            } else {
+                textContent.style.textShadow = 'none';
+            }
+        }
+        
+        // *** 속성 패널 렌더링 수정 (컬러 코드 표시) ***
+        function renderPropertiesPanel() {
+            if (!selectedElement) {
+                propsContent.innerHTML = '선택된 요소 없음';
+                return;
+            }
+            const props = selectedElement.dataset;
+            let html = `<div><strong>ID:</strong> ${props.id}</div><div><strong>Type:</strong> ${props.type}</div>`;
+            const editableProps = ['x', 'y', 'width', 'height'];
+            
+            editableProps.forEach(key => {
+                 html += `<div class="prop-group"><label>${key.toUpperCase()}</label><input type="number" data-prop="${key}" value="${Math.round(parseFloat(props[key])) || 0}"></div>`;
+            });
+
+            for (const key in props) {
+                if (!['id', 'type', ...editableProps, 'originalWidth', 'originalHeight'].includes(key)) {
+                    if (key === 'colorOutline' && !['2', '5'].includes(props.style)) {
+                        continue;
+                    }
+                    const isReadOnly = (key === 'ratio') ? 'readonly' : '';
+                    let value = props[key];
+                    if (key === 'ratio') value = parseFloat(props[key]).toFixed(0);
+                    
+                    html += `<div class="prop-group"><label>${key}</label><input type="text" data-prop="${key}" value="${value}" ${isReadOnly}></div>`;
+                }
+            }
+            propsContent.innerHTML = html;
+        }
+
+        // *** 속성 변경 핸들러 수정 (컬러 코드 처리) ***
+        function handlePropertyChange(e) {
+            const prop = e.target.dataset.prop;
+            let value = e.target.value;
+            if (!selectedElement) return;
+
+            // 컬러 속성일 경우, # 이나 0x 를 제거하고 6자리만 저장
+            if (prop === 'colorDefault' || prop === 'colorOutline') {
+                value = value.replace(/#|0x/gi, '').toUpperCase();
+                e.target.value = value; // 입력창의 값도 6자리로 통일
+            }
+            
+            selectedElement.dataset[prop] = value;
+
+            if (['string', 'align', 'style', 'colorDefault', 'colorOutline'].includes(prop)) {
+                applyTextStyles(selectedElement);
+                if(prop === 'style') renderPropertiesPanel();
+            }
+
+            const numericValue = parseFloat(value);
+            if(isNaN(numericValue)) return;
+            
+            switch(prop) {
+                case 'x': selectedElement.style.left = numericValue + 'px'; break;
+                case 'y': selectedElement.style.top = numericValue + 'px'; break;
+                case 'width':
+                    selectedElement.style.width = numericValue + 'px';
+                    if (selectedElement.dataset.type !== 'Text') {
+                        const ratio = selectedElement.dataset.originalHeight / selectedElement.dataset.originalWidth;
+                        const newHeight = numericValue * ratio;
+                        selectedElement.style.height = newHeight + 'px';
+                        selectedElement.dataset.height = newHeight;
+                        updatePropInput('height', newHeight); 
+                    }
+                    if (selectedElement.dataset.type === 'ItemIcon') {
+                        const originalWidthForRatio = 50; 
+                        const newRatio = (numericValue / originalWidthForRatio) * 100;
+                        selectedElement.dataset.ratio = newRatio;
+                        updatePropInput('ratio', newRatio);
+                    }
+                    break;
+                case 'height':
+                    selectedElement.style.height = numericValue + 'px';
+                    if (selectedElement.dataset.type !== 'Text') {
+                        const ratio = selectedElement.dataset.originalWidth / selectedElement.dataset.originalHeight;
+                        const newWidth = numericValue * ratio;
+                        selectedElement.style.width = newWidth + 'px';
+                        selectedElement.dataset.width = newWidth;
+                        updatePropInput('width', newWidth);
+                    }
+                    break;
+            }
+        }
+        
+        function addNewElement(type, data) {
+            elementCounter++;
+            const el = document.createElement('div');
+            el.classList.add('draggable');
+            el.dataset.id = `${type}_${elementCounter}`;
+            el.dataset.type = type;
+            el.dataset.x = 50; el.dataset.y = 50;
+            el.style.left = '50px'; el.style.top = '50px';
+            
+            const width = data.width || 100;
+            const height = data.height || 100;
+            el.dataset.width = width;
+            el.dataset.height = height;
+            el.dataset.originalWidth = width;
+            el.dataset.originalHeight = height;
+            el.style.width = `${width}px`;
+            el.style.height = `${height}px`;
+            
+            let contentHtml = '';
+            switch(type) {
+                case 'Text':
+                    el.dataset.string = data.text; el.dataset.align = '1';
+                    el.dataset.style = '0'; 
+                    // 초기값은 6자리로만 저장
+                    el.dataset.colorDefault = '000000'; 
+                    el.dataset.colorOutline = 'FFFFFF';
+                    contentHtml = `<div class="text-content">${data.text}</div>`;
+                    break;
+                case 'ItemIcon':
+                    el.dataset.itemSN = data.itemSN; 
+                    el.dataset.ratio = 100;
+                    contentHtml = `<img src="${data.img}" alt="item">`;
+                    break;
+                case 'AvatarSlot':
+                    el.dataset.charIndex = data.charIndex; el.dataset.equippedItems = '';
+                    contentHtml = `<img src="${data.img}" alt="avatar">`;
+                    break;
+                case 'Effect':
+                     el.dataset.path = data.path;
+                     contentHtml = `<img src="${data.img}" alt="effect">`;
+                     break;
+            }
+            
+            el.innerHTML = contentHtml + '<div class="resizer"></div>';
+            canvas.appendChild(el);
+            makeInteractive(el);
+            // 텍스트 추가 시 스타일 바로 적용
+            if(type === 'Text') applyTextStyles(el);
+            selectElement(el);
+        }
+        
+        document.getElementById('add-text').onclick = () => addNewElement('Text', {text: '새 텍스트', width: 150, height: 30});
+        document.getElementById('add-avatar').onclick = () => addNewElement('AvatarSlot', {charIndex: '0', img: 'https://via.placeholder.com/80x120/0000FF/FFFFFF?text=Avatar', width: 80, height: 120});
+        document.getElementById('add-effect').onclick = () => addNewElement('Effect', {path: 'effect/path', img: 'https://via.placeholder.com/100/28a745/FFFFFF?text=Effect', width: 100, height: 100});
+
+        // *** XML 생성 로직 수정 (컬러 코드 형식 변환) ***
+        document.getElementById('generate-xml').onclick = () => {
+            let textsXml = '<Texts>\n';
+            let itemSlotsXml = '<ItemSlots>\n';
+            let itemIconsXml = '<ItemIcons>\n';
+            let objectsXml = '<ObjectTables>\n';
+            let hasTexts = false, hasSlots = false, hasIcons = false, hasObjects = false;
+
+            document.querySelectorAll('#canvas .draggable').forEach(el => {
+                const d = el.dataset;
+                const x = Math.round(parseFloat(d.x)), y = Math.round(parseFloat(d.y));
+                const w = Math.round(parseFloat(d.width)), h = Math.round(parseFloat(d.height));
+                
+                switch(d.type) {
+                    case 'Text':
+                        hasTexts = true;
+                        // XML 생성 시점에 0xFF를 붙여줌
+                        const colorDefaultXml = `0xFF${d.colorDefault}`;
+                        let textAttrs = `x="${x}" y="${y}" width="${w}" height="${h}" align="${d.align}" style="${d.style}" colorDefault="${colorDefaultXml}"`;
+                        
+                        if (['2', '5'].includes(d.style)) {
+                            const colorOutlineXml = `0xFF${d.colorOutline}`;
+                            textAttrs += ` colorOutline="${colorOutlineXml}"`;
+                        }
+                        
+                        textsXml += `    <Text ${textAttrs}>${d.string}</Text>\n`;
+                        break;
+                    case 'AvatarSlot':
+                        hasSlots = true;
+                        itemSlotsXml += `    <Slot x="${x}" y="${y}" charIndex="${d.charIndex}">\n        <EquippedItems />\n    </Slot>\n`;
+                        break;
+                    case 'ItemIcon':
+                        hasIcons = true;
+                        itemIconsXml += `    <Icon x="${x}" y="${y}" itemSN="${d.itemSN}" ratio="${parseFloat(d.ratio).toFixed(0)}" />\n`;
+                        break;
+                    case 'Effect':
+                        hasObjects = true;
+                        objectsXml += `    <Object x="${x}" y="${y}" path="${d.path}" />\n`;
+                        break;
+                }
+            });
+
+            textsXml += '</Texts>'; itemSlotsXml += '</ItemSlots>';
+            itemIconsXml += '</ItemIcons>'; objectsXml += '</ObjectTables>';
+            
+            let finalXml = `<Static img="PopupEvent/${backgroundFileName}">\n`;
+            if (hasTexts) finalXml += textsXml + '\n';
+            if (hasSlots) finalXml += itemSlotsXml + '\n';
+            if (hasIcons) finalXml += itemIconsXml + '\n';
+            if (hasObjects) finalXml += objectsXml + '\n';
+            finalXml += '</Static>';
+
+            document.getElementById('xml-output').value = finalXml;
+        };
+    </script>
+</body>
+</html>
